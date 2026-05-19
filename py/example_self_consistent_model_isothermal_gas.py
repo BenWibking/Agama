@@ -188,7 +188,8 @@ def make_isothermal_gas_density(
         )
 
 
-def gas_rotation_velocity(density, potential, sound_speed, plasma_beta, R, z):
+def gas_rotation_velocity(density, potential, sound_speed, plasma_beta, R, z,
+                          include_magnetic_tension=True):
     """
     Return the azimuthal streaming velocity from radial MHD force balance.
 
@@ -219,7 +220,8 @@ def gas_rotation_velocity(density, potential, sound_speed, plasma_beta, R, z):
 
     xyz_cyl = numpy.column_stack((rsafe.ravel(), rsafe.ravel() * 0, z.ravel()))
     dphi_dr = -potential.force(xyz_cyl)[:, 0]
-    vphi2 = R.ravel() * (dphi_dr + ceff2 * dlnrho_dr) + 2.0 * cs2 * mag_fraction
+    tension_term = 2.0 * cs2 * mag_fraction if include_magnetic_tension else 0.0
+    vphi2 = R.ravel() * (dphi_dr + ceff2 * dlnrho_dr) + tension_term
     vphi = numpy.sqrt(numpy.maximum(vphi2, 0.0)).reshape(R.shape)
     return numpy.where(R > 0, vphi, 0.0)
 
@@ -266,17 +268,39 @@ def write_gas_magnetic_field(filename, snapshot, density, sound_speed, plasma_be
     )
 
 
-def write_rotation_curve(filename, potential):
+def write_rotation_curve(filename, plot_filename, potential, sound_speed, plasma_beta):
     radii = numpy.logspace(-2.0, 2.0, 81)
     xyz = numpy.column_stack((radii, radii * 0, radii * 0))
     vcirc = (-potential.force(xyz)[:, 0] * radii)**0.5
+    mag_fraction = magnetic_pressure_fraction(plasma_beta)
+    vtension = numpy.sqrt(vcirc**2 + 2.0 * sound_speed**2 * mag_fraction)
     numpy.savetxt(
         filename,
-        numpy.column_stack((radii, vcirc)),
+        numpy.column_stack((radii, vcirc, vtension)),
         fmt="%.6g",
         delimiter="\t",
-        header="radius[kpc]\tv_circ[km/s]",
+        header="radius[kpc]\tv_circ_gravity[km/s]\tv_circ_gravity_plus_magnetic_tension[km/s]",
     )
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib is not available; skipped rotation curve plot")
+        return
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    ax.plot(radii, vcirc, label="Gravity only", lw=2)
+    ax.plot(radii, vtension, label="Gravity + magnetic tension", lw=2)
+    ax.set_xscale("log")
+    ax.set_xlim(radii[0], radii[-1])
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel("R [kpc]")
+    ax.set_ylabel("circular speed [km/s]")
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(plot_filename, dpi=160)
+    plt.close(fig)
 
 
 def write_gas_field_grid(filename, density, potential, sound_speed, plasma_beta,
@@ -371,7 +395,7 @@ def build_parser():
     parser.add_argument("--ini", default=default_ini, help="Input INI file; default: data/SCM.ini")
     parser.add_argument("--iterations", type=int, default=6, help="Number of DF+gas fixed-point iterations")
     parser.add_argument("--gas-sound-speed", type=float, default=10.0, help="Isothermal gas sound speed [km/s]")
-    parser.add_argument("--gas-plasma-beta", type=float, default=float("inf"),
+    parser.add_argument("--gas-plasma-beta", type=float, default=10.0,
         help="Constant plasma beta P_gas/P_mag for an ordered toroidal field; inf disables B")
     parser.add_argument("--gas-zmax", type=float, default=None, help="Vertical range for gas normalization [kpc]")
     parser.add_argument("--gas-vertical-taper", type=float, default=None,
@@ -502,7 +526,8 @@ def main():
 
     prefix = args.output_prefix
     print("\nWriting diagnostics")
-    write_rotation_curve(prefix + "_rotation_curve.txt", model.potential)
+    write_rotation_curve(prefix + "_rotation_curve.txt", prefix + "_rotation_curve.png",
+        model.potential, args.gas_sound_speed, args.gas_plasma_beta)
     write_gas_profiles(prefix, model.components[3].density, ini_poten_gas_disk,
         solar_radius, args.gas_sound_speed, args.gas_plasma_beta)
     write_gas_field_grid(prefix + "_gas_Rz_profile.txt", model.components[3].density,
